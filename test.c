@@ -6,7 +6,7 @@
 #define min(a,b) ( a < b ? a : b)
 #define N 32
 
-int performCholesky(double * matA, double * matRef, char * kernelFile, char * kernelName, cl_device_id dev, int * valid, cl_ulong * duration, char ** log);
+int performCholesky(double * matA, double * matRef, char * kernelFile, size_t * groupSize, cl_device_id dev, int * errCount, cl_ulong * duration, char ** log);
 
 int main() {
 
@@ -20,7 +20,7 @@ int main() {
    double * matL = malloc(N * N * sizeof(double));
    for (y=0; y<N; y++) {
       for (x=0; x<=y; x++) {
-         matL[y*N+x] = x+y+1.0;
+         matL[y*N+x] = 1.0 / ((double)(x+y)+5.0);
       }
    }
 
@@ -34,10 +34,29 @@ int main() {
       }
    }
 
+   char * kernelFiles[] = {
+      "dpotrf_v1.cl",
+      "dpotrf_v2.cl"
+   };
+
+   size_t kernelGroupSize[][3] = {
+      {32, 32, 1},
+      {32, 16, 1}
+   };
+
+   int nb_ker = sizeof(kernelFiles) / sizeof(char*);
+
+   printf("Benchmarking %d kernels:\n", nb_ker);
+   int k;
+   for (k=0; k<nb_ker; k++) {
+      printf("  - %s: group size %dx%dx%d\n", kernelFiles[k], (int)kernelGroupSize[k][0], (int)kernelGroupSize[k][1], (int)kernelGroupSize[k][2]);
+   }
+   printf("\n");
+
    cl_uint nb_platf;
    clGetPlatformIDs(0, NULL, &nb_platf);
 
-   printf("Found %d platform%s\n", nb_platf, nb_platf > 1 ? "s" : "");
+   printf("%d OpenCL platform%s found\n", nb_platf, nb_platf > 1 ? "s" : "");
 
    cl_platform_id platfs[nb_platf];
    clGetPlatformIDs(nb_platf, platfs, NULL);
@@ -54,11 +73,10 @@ int main() {
       clGetPlatformInfo(platfs[p], CL_PLATFORM_VENDOR, 0, NULL, &plat_vendor_size);
       char plat_vendor[plat_vendor_size];
       clGetPlatformInfo(platfs[p], CL_PLATFORM_VENDOR, plat_vendor_size, &plat_vendor, NULL);
-      printf("\nBenchmark on platform: %s (%s)\n", plat_name, plat_vendor);
 
       cl_uint nb_devs;
       clGetDeviceIDs(platfs[p], CL_DEVICE_TYPE_ALL, 0, NULL, &nb_devs);
-      printf("Found %d device%s\n", nb_devs, nb_devs > 1 ? "s" : "");
+      printf("\nBenchmarking platform: %s (%s) - %d device%s\n\n", plat_name, plat_vendor, nb_devs, nb_devs > 1 ? "s" : "");
 
       cl_device_id devs[nb_devs];
       clGetDeviceIDs(platfs[p], CL_DEVICE_TYPE_ALL, nb_devs, devs, NULL);
@@ -70,23 +88,22 @@ int main() {
          char dev_name[dev_name_size];
          clGetDeviceInfo(devs[d], CL_DEVICE_NAME, dev_name_size, dev_name, NULL);
 
-         int valid;
+         printf("  - Benchmarking device %s:\n", dev_name);
+
+         int errCount;
          cl_ulong duration;
-         char * kernelFile = "./dpotrf.cl";
          char * log;
-         char * kernelNames[] = {"dpotrf_v1"};
 
          int k;
-         for (k=0; k<sizeof(kernelNames)/sizeof(char*); k++) {
+         for (k=0; k<nb_ker; k++) {
 
-            int err = performCholesky(matA, matL, kernelFile, kernelNames[k], devs[d], &valid, &duration, &log);
+            int err = performCholesky(matA, matL, kernelFiles[k], (size_t*)&kernelGroupSize[k], devs[d], &errCount, &duration, &log);
 
-            if (err != 0) {
-               printf("Error %d on %s\n", err, dev_name);
-               printf("Build log: %s\n", log);
+            if (err != CL_SUCCESS) {
+               printf("      - Error %d with kernel %s. Build log: %s\n", err, kernelFiles[k], log);
             }
             else {
-               printf("Execution of kernel %s on %s took %.f ms and %s.\n", kernelNames[k], dev_name, duration/1000.0, (valid ? "succeeded" : "failed"));
+               printf("      - kernel %s took %.f ms and %s (%d errors).\n", kernelFiles[k], duration/1000.0, (errCount == 0 ? "succeeded" : "failed"), errCount);
             }
          }
       }
@@ -97,13 +114,14 @@ int main() {
    return 0;
 }
 
-int performCholesky(double * matA, double * matRef, char * kernelFile, char * kernelName, cl_device_id dev, int * valid, cl_ulong * duration, char ** log) {
+int performCholesky(double * matA, double * matRef, char * kernelFile, size_t * kernelGroupSize, cl_device_id dev, int * errCount, cl_ulong * duration, char ** log) {
 
    cl_event ev_writeA, ev_ker, ev_readA;
    int x, y;
    cl_int err;
 
    double * matB = malloc(N * N * sizeof(double));
+   memset(matB, 0, N * N * sizeof(double));
 
    FILE * f = fopen(kernelFile, "r");
    if (f == NULL) return 1;
@@ -137,12 +155,15 @@ int performCholesky(double * matA, double * matRef, char * kernelFile, char * ke
       clGetProgramBuildInfo(prg, dev, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
       *log = malloc(log_size);
       clGetProgramBuildInfo(prg, dev, CL_PROGRAM_BUILD_LOG, log_size, *log, NULL);
+      return err;
    }
 
    
-   cl_kernel ker = clCreateKernel(prg, kernelName, &err);
+   cl_kernel ker = clCreateKernel(prg, "dpotrf", &err);
    if (err != CL_SUCCESS) {
-      *log = strdup("Unable to create kernel (check kernel name...)");
+      char buffer[4096];
+      sprintf(buffer, "Unable to create kernel with name \"%s\" from file %s", "dpotrf", kernelFile);
+      *log = strdup(buffer);
       return err;
    }
 
@@ -165,9 +186,8 @@ int performCholesky(double * matA, double * matRef, char * kernelFile, char * ke
    }
 
    size_t globalDim[] = {N, N};
-   size_t localDim[] = {32, 32};
    cl_event deps[] = {ev_writeA};
-   err = clEnqueueNDRangeKernel(cq, ker, 2, NULL, globalDim, localDim, 1, deps, &ev_ker);
+   err = clEnqueueNDRangeKernel(cq, ker, 2, NULL, globalDim, kernelGroupSize, 1, deps, &ev_ker);
    if (err != CL_SUCCESS) {
       *log = strdup("Unable to enqueue kernel execution command");
       return err;
@@ -206,12 +226,11 @@ int performCholesky(double * matA, double * matRef, char * kernelFile, char * ke
    clReleaseContext(ctx);
 
    // Check result
-   *valid = 1;
+   *errCount = 0;
    for (y=0; y<N; y++) {
       for (x=0; x<=y; x++) {
-         if (fabs(matB[y*N+x]-matRef[y*N+x]) > 0.01) {
-            *valid = 0;
-            return 0;
+         if (fabs(matB[y*N+x]-matRef[y*N+x]) > 10e-9) {
+            *errCount += 1;
          }
       }
    }

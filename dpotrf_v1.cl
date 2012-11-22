@@ -12,7 +12,7 @@
  *   - does not work on old NVidia cards (32x32 = 1024 work-items > 512)
  * 
  */
-__kernel void dpotrf_v1(__global double * m) {
+__kernel void dpotrf(__global double * m) {
    
    __local double s[32*32];
    
