@@ -11,6 +11,9 @@ int performCholesky(double * matA, double * matRef, char * kernelFile, size_t * 
 #pragma weak clGetExtensionFunctionAddressForPlatform
 extern void * clGetExtensionFunctionAddressForPlatform(cl_platform_id, const char *);
 
+#pragma weak clGetExtensionFunctionAddress
+extern void * clGetExtensionFunctionAddress(const char *);
+
 int main() {
 
    int x, y, z;
@@ -113,11 +116,15 @@ int main() {
       }
 
       
-      if (clGetExtensionFunctionAddressForPlatform != NULL) {
-         void (*clShutdown)(void) = clGetExtensionFunctionAddressForPlatform(platfs[p], "clShutdown");
+      if (strstr(plat_name, "SOCL") != NULL) {
+         
+         void (*clShutdown)(void) = (clGetExtensionFunctionAddressForPlatform != NULL ?
+                                     clGetExtensionFunctionAddressForPlatform(platfs[p], "clShutdown") :
+                                    (clGetExtensionFunctionAddress != NULL ?
+                                     clGetExtensionFunctionAddress("clShutdown"):
+                                     NULL));
 
          if (clShutdown != NULL) {
-            printf("Calling clShutdown :)\n");
             clShutdown();
          }
       }

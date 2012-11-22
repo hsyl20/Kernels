@@ -11,9 +11,6 @@
  * Compared to v1, we halve the number of work-items so that old NVidia cards can execute it.
  * Consequently, work-items do twice as much work-load as in v1
  *
- * Issues: 
- *   - does not work on old NVidia cards (32x32 = 1024 work-items > 512)
- * 
  */
 __kernel void dpotrf(__global double * m) {
    
