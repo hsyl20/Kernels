@@ -3,13 +3,12 @@
 #include <CL/cl.h>
 
 #define min(a,b) ( a < b ? a : b)
+#define N 32
+
+void performCholesky(double * matA, double * matRef, char * kernelFile, cl_device_id dev, int * valid, cl_ulong * duration, char ** log);
 
 int main() {
 
-   #define N 32
-   size_t size = N * N * sizeof(double);
-
-   cl_event ev_writeA, ev_ker, ev_readA;
    int x, y, z;
 
    double * matA = malloc(N * N * sizeof(double));
@@ -63,11 +62,38 @@ int main() {
 
    cl_device_id devs[nb_devs];
    clGetDeviceIDs(platfs[0], CL_DEVICE_TYPE_ALL, nb_devs, devs, NULL);
+   size_t dev_name_size;
+   clGetDeviceInfo(devs[0], CL_DEVICE_NAME, 0, NULL, &dev_name_size);
+   char dev_name[dev_name_size];
+   clGetDeviceInfo(devs[0], CL_DEVICE_NAME, dev_name_size, dev_name, NULL);
 
-   cl_context ctx = clCreateContext(NULL, nb_devs, devs, NULL, NULL, NULL);
-   cl_command_queue cq = clCreateCommandQueue(ctx, devs[0], CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, NULL);
+   int valid;
+   cl_ulong duration;
+   char * k = "./dpotrf.cl";
+   char * log;
 
-   FILE * f = fopen("./dpotrf.cl", "r");
+   performCholesky(matA, matL, k, devs[0], &valid, &duration, &log);
+
+   printf("Build log: %s\n", log);
+
+   printf("Execution of kernel %s on %s took %.f ms and %s.\n", k, dev_name, duration/1000.0, (valid ? "succeeded" : "failed"));
+
+   printf("Fini.\n");
+
+   return 0;
+}
+
+void performCholesky(double * matA, double * matRef, char * kernelFile, cl_device_id dev, int * valid, cl_ulong * duration, char ** log) {
+
+   cl_event ev_writeA, ev_ker, ev_readA;
+   int x, y;
+
+   double * matB = malloc(N * N * sizeof(double));
+
+   cl_context ctx = clCreateContext(NULL, 1, &dev, NULL, NULL, NULL);
+   cl_command_queue cq = clCreateCommandQueue(ctx, dev, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, NULL);
+
+   FILE * f = fopen(kernelFile, "r");
    fseek(f, 0, SEEK_END);
    size_t source_size = ftell(f);
    fseek(f, 0, SEEK_SET);
@@ -77,23 +103,21 @@ int main() {
    source[source_size] = '\0';
    fclose(f);
 
-   printf("Code kernel: %s\n", source);
-
    cl_program prg = clCreateProgramWithSource(ctx, 1, (const char**)&source, NULL, NULL);
-   clBuildProgram(prg, nb_devs, devs, NULL, NULL, NULL);
+   clBuildProgram(prg, 1, &dev, NULL, NULL, NULL);
 
-   size_t log_size;
-   clGetProgramBuildInfo(prg, devs[0], CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
-   char log[log_size];
-   clGetProgramBuildInfo(prg, devs[0], CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
-
-   printf("Build log: %s\n", log);
+   if (log != NULL) {
+      size_t log_size;
+      clGetProgramBuildInfo(prg, dev, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+      *log = malloc(log_size);
+      clGetProgramBuildInfo(prg, dev, CL_PROGRAM_BUILD_LOG, log_size, *log, NULL);
+   }
 
    cl_kernel ker = clCreateKernel(prg, "dpotrf", NULL);
 
-   cl_mem bufA = clCreateBuffer(ctx, CL_MEM_READ_WRITE, size, NULL, NULL);
+   cl_mem bufA = clCreateBuffer(ctx, CL_MEM_READ_WRITE, N * N * sizeof(double), NULL, NULL);
 
-   clEnqueueWriteBuffer(cq, bufA, 0, 0, size, matA, 0, NULL, &ev_writeA);
+   clEnqueueWriteBuffer(cq, bufA, 0, 0, N * N * sizeof(double), matA, 0, NULL, &ev_writeA);
 
    clSetKernelArg(ker, 0, sizeof(bufA), &bufA);
 
@@ -102,20 +126,33 @@ int main() {
    cl_event deps[] = {ev_writeA};
    clEnqueueNDRangeKernel(cq, ker, 2, NULL, globalDim, localDim, 1, deps, &ev_ker);
 
-   clEnqueueReadBuffer(cq, bufA, 0, 0, size, matA, 1, &ev_ker, &ev_readA);
+   clEnqueueReadBuffer(cq, bufA, 0, 0, N*N*sizeof(double), matB, 1, &ev_ker, &ev_readA);
 
    clFinish(cq);
 
-   printf("Cholesky A: \n");
+   cl_ulong start, end;
+   clGetEventProfilingInfo(ev_ker, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
+   clGetEventProfilingInfo(ev_ker, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
+
+   *duration = end-start;
+
+   clReleaseEvent(ev_readA);
+   clReleaseEvent(ev_writeA);
+   clReleaseEvent(ev_ker);
+   clReleaseMemObject(bufA);
+   clReleaseKernel(ker);
+   clReleaseProgram(prg);
+   clReleaseCommandQueue(cq);
+   clReleaseContext(ctx);
+
+   // Check result
+   *valid = 1;
    for (y=0; y<N; y++) {
       for (x=0; x<=y; x++) {
-         printf("%.2f ", matA[y*N + x]);
+         if (fabs(matB[y*N+x]-matRef[y*N+x]) > 0.01) {
+            *valid = 0;
+            return;
+         }
       }
-      printf("\n");
    }
-
-   printf("Fini.\n");
-
-   return 0;
 }
-

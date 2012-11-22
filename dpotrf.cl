@@ -1,3 +1,12 @@
+/**
+ * Cholesky decomposition (version 1.0)
+ * 
+ * Call with:
+ *    matrix size (m) = 32x32 
+ *    group size      = 32x32
+ *    grid size       = 32x32
+ * 
+ */
 __kernel void dpotrf(__global double * m) {
    
    __local double s[32*32];
