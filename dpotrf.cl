@@ -1,3 +1,5 @@
+#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+
 /**
  * Cholesky decomposition (version 1.0)
  * 
@@ -5,6 +7,9 @@
  *    matrix size (m) = 32x32 
  *    group size      = 32x32
  *    grid size       = 32x32
+ *
+ * Issues: 
+ *   - does not work on old NVidia cards (32x32 = 1024 work-items > 512)
  * 
  */
 __kernel void dpotrf_v1(__global double * m) {

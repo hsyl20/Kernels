@@ -14,28 +14,24 @@ int main() {
 
    double * matA = malloc(N * N * sizeof(double));
 
-   // init L
-   //intf("L:\n");
+   /* L is the reference matrix. We compute A = L*Lt to then perform
+    * cholesky factorization on A (and we should find L back)*/
+
    double * matL = malloc(N * N * sizeof(double));
    for (y=0; y<N; y++) {
       for (x=0; x<=y; x++) {
          matL[y*N+x] = x+y+1.0;
-         //printf("%.2f ", matL[y*N + x]);
       }
-      //printf("\n");
    }
 
-   // compute A = L*Lt
-   //printf("A:\n");
+   /* compute A = L*Lt */
    for (y=0; y<N; y++) {
       for (x=0; x<=y; x++) {
          matA[y*N+x] = 0.0;
          for (z=0; z<=min(x,y); z++) {
             matA[y*N+x] += matL[y*N+z] * matL[x*N+z];
          }
-        // printf("%.2f ", matA[y*N + x]);
       }
-      //printf("\n");
    }
 
    cl_uint nb_platf;
@@ -134,9 +130,9 @@ int performCholesky(double * matA, double * matRef, char * kernelFile, char * ke
    }
 
    cl_program prg = clCreateProgramWithSource(ctx, 1, (const char**)&source, NULL, NULL);
-   clBuildProgram(prg, 1, &dev, NULL, NULL, NULL);
+   err = clBuildProgram(prg, 1, &dev, NULL, NULL, NULL);
 
-   if (log != NULL) {
+   if (err != CL_SUCCESS) {
       size_t log_size;
       clGetProgramBuildInfo(prg, dev, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
       *log = malloc(log_size);
