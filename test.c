@@ -8,6 +8,9 @@
 
 int performCholesky(double * matA, double * matRef, char * kernelFile, size_t * groupSize, cl_device_id dev, int * errCount, cl_ulong * duration, char ** log);
 
+#pragma weak clGetExtensionFunctionAddressForPlatform
+extern void * clGetExtensionFunctionAddressForPlatform(cl_platform_id, const char *);
+
 int main() {
 
    int x, y, z;
@@ -108,9 +111,21 @@ int main() {
          }
          printf("\n");
       }
+
+      
+      if (clGetExtensionFunctionAddressForPlatform != NULL) {
+         void (*clShutdown)(void) = clGetExtensionFunctionAddressForPlatform(platfs[p], "clShutdown");
+
+         if (clShutdown != NULL) {
+            printf("Calling clShutdown :)\n");
+            clShutdown();
+         }
+      }
    }
 
    printf("\nDone.\n");
+
+
 
    return 0;
 }
