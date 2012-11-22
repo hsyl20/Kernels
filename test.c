@@ -1,11 +1,12 @@
 #include <stdio.h>
 #include <math.h>
+#include <string.h>
 #include <CL/cl.h>
 
 #define min(a,b) ( a < b ? a : b)
 #define N 32
 
-int performCholesky(double * matA, double * matRef, char * kernelFile, cl_device_id dev, int * valid, cl_ulong * duration, char ** log);
+int performCholesky(double * matA, double * matRef, char * kernelFile, char * kernelName, cl_device_id dev, int * valid, cl_ulong * duration, char ** log);
 
 int main() {
 
@@ -75,17 +76,22 @@ int main() {
 
          int valid;
          cl_ulong duration;
-         char * k = "./dpotrf.cl";
+         char * kernelFile = "./dpotrf.cl";
          char * log;
+         char * kernelNames[] = {"dpotrf_v1"};
 
-         int err = performCholesky(matA, matL, k, devs[d], &valid, &duration, &log);
+         int k;
+         for (k=0; k<sizeof(kernelNames)/sizeof(char*); k++) {
 
-         if (err != 0) {
-            printf("Error %d on %s\n", err, dev_name);
-            printf("Build log: %s\n", log);
-         }
-         else {
-            printf("Execution of kernel %s on %s took %.f ms and %s.\n", k, dev_name, duration/1000.0, (valid ? "succeeded" : "failed"));
+            int err = performCholesky(matA, matL, kernelFile, kernelNames[k], devs[d], &valid, &duration, &log);
+
+            if (err != 0) {
+               printf("Error %d on %s\n", err, dev_name);
+               printf("Build log: %s\n", log);
+            }
+            else {
+               printf("Execution of kernel %s on %s took %.f ms and %s.\n", kernelNames[k], dev_name, duration/1000.0, (valid ? "succeeded" : "failed"));
+            }
          }
       }
    }
@@ -95,10 +101,11 @@ int main() {
    return 0;
 }
 
-int performCholesky(double * matA, double * matRef, char * kernelFile, cl_device_id dev, int * valid, cl_ulong * duration, char ** log) {
+int performCholesky(double * matA, double * matRef, char * kernelFile, char * kernelName, cl_device_id dev, int * valid, cl_ulong * duration, char ** log) {
 
    cl_event ev_writeA, ev_ker, ev_readA;
    int x, y;
+   cl_int err;
 
    double * matB = malloc(N * N * sizeof(double));
 
@@ -114,8 +121,17 @@ int performCholesky(double * matA, double * matRef, char * kernelFile, cl_device
    source[source_size] = '\0';
    fclose(f);
 
-   cl_context ctx = clCreateContext(NULL, 1, &dev, NULL, NULL, NULL);
-   cl_command_queue cq = clCreateCommandQueue(ctx, dev, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, NULL);
+   cl_context ctx = clCreateContext(NULL, 1, &dev, NULL, NULL, &err);
+   if (err != CL_SUCCESS) {
+      *log = strdup("Unable to create context");
+      return err;
+   }
+
+   cl_command_queue cq = clCreateCommandQueue(ctx, dev, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, &err);
+   if (err != CL_SUCCESS) {
+      *log = strdup("Unable to create command queue");
+      return err;
+   }
 
    cl_program prg = clCreateProgramWithSource(ctx, 1, (const char**)&source, NULL, NULL);
    clBuildProgram(prg, 1, &dev, NULL, NULL, NULL);
@@ -127,26 +143,60 @@ int performCholesky(double * matA, double * matRef, char * kernelFile, cl_device
       clGetProgramBuildInfo(prg, dev, CL_PROGRAM_BUILD_LOG, log_size, *log, NULL);
    }
 
-   cl_kernel ker = clCreateKernel(prg, "dpotrf", NULL);
+   
+   cl_kernel ker = clCreateKernel(prg, kernelName, &err);
+   if (err != CL_SUCCESS) {
+      *log = strdup("Unable to create kernel (check kernel name...)");
+      return err;
+   }
 
-   cl_mem bufA = clCreateBuffer(ctx, CL_MEM_READ_WRITE, N * N * sizeof(double), NULL, NULL);
+   cl_mem bufA = clCreateBuffer(ctx, CL_MEM_READ_WRITE, N * N * sizeof(double), NULL, &err);
+   if (err != CL_SUCCESS) {
+      *log = strdup("Unable to allocate buffer");
+      return err;
+   }
 
-   clEnqueueWriteBuffer(cq, bufA, 0, 0, N * N * sizeof(double), matA, 0, NULL, &ev_writeA);
+   err = clEnqueueWriteBuffer(cq, bufA, 0, 0, N * N * sizeof(double), matA, 0, NULL, &ev_writeA);
+   if (err != CL_SUCCESS) {
+      *log = strdup("Unable to enqueue write buffer command");
+      return err;
+   }
 
-   clSetKernelArg(ker, 0, sizeof(bufA), &bufA);
+   err = clSetKernelArg(ker, 0, sizeof(bufA), &bufA);
+   if (err != CL_SUCCESS) {
+      *log = strdup("Unable to set kernel parameter");
+      return err;
+   }
 
    size_t globalDim[] = {N, N};
    size_t localDim[] = {32, 32};
    cl_event deps[] = {ev_writeA};
-   clEnqueueNDRangeKernel(cq, ker, 2, NULL, globalDim, localDim, 1, deps, &ev_ker);
+   err = clEnqueueNDRangeKernel(cq, ker, 2, NULL, globalDim, localDim, 1, deps, &ev_ker);
+   if (err != CL_SUCCESS) {
+      *log = strdup("Unable to enqueue kernel execution command");
+      return err;
+   }
 
-   clEnqueueReadBuffer(cq, bufA, 0, 0, N*N*sizeof(double), matB, 1, &ev_ker, &ev_readA);
+   err = clEnqueueReadBuffer(cq, bufA, 0, 0, N*N*sizeof(double), matB, 1, &ev_ker, &ev_readA);
+   if (err != CL_SUCCESS) {
+      *log = strdup("Unable to enqueue read buffer command");
+      return err;
+   }
 
    clFinish(cq);
 
    cl_ulong start, end;
-   clGetEventProfilingInfo(ev_ker, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
-   clGetEventProfilingInfo(ev_ker, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
+   err = clGetEventProfilingInfo(ev_ker, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
+   if (err != CL_SUCCESS) {
+      *log = strdup("Unable to get event profiling info (start time)");
+      return err;
+   }
+
+   err = clGetEventProfilingInfo(ev_ker, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
+   if (err != CL_SUCCESS) {
+      *log = strdup("Unable to get event profiling info (end time)");
+      return err;
+   }
 
    *duration = end-start;
 
