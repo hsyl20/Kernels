@@ -106,6 +106,7 @@ int main() {
                printf("      - kernel %s took %.f ms and %s (%d errors).\n", kernelFiles[k], duration/1000.0, (errCount == 0 ? "succeeded" : "failed"), errCount);
             }
          }
+         printf("\n");
       }
    }
 
