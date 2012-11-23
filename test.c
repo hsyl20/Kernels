@@ -4,9 +4,8 @@
 #include <CL/cl.h>
 
 #define min(a,b) ( a < b ? a : b)
-#define N 32
 
-int performCholesky(double * matA, double * matRef, char * kernelFile, size_t * groupSize, cl_device_id dev, int * errCount, cl_ulong * duration, char ** log);
+int performCholesky(double * matA, char * kernelFile, size_t * kernelGridSize, size_t * kernelGroupSize, cl_device_id dev, int * errCount, cl_ulong * duration, char ** log);
 
 #pragma weak clGetExtensionFunctionAddressForPlatform
 extern void * clGetExtensionFunctionAddressForPlatform(cl_platform_id, const char *);
@@ -14,40 +13,61 @@ extern void * clGetExtensionFunctionAddressForPlatform(cl_platform_id, const cha
 #pragma weak clGetExtensionFunctionAddress
 extern void * clGetExtensionFunctionAddress(const char *);
 
+/* L is the reference matrix. We compute A = L*Lt to then perform
+ * cholesky factorization on A (and we should find L back)*/
+
+#define L(x,y) (1.0 / ((double)(x+y)+5.0))
+
 int main() {
 
    int x, y, z;
 
-   double * matA = malloc(N * N * sizeof(double));
+   double * mat32 = malloc(32 * 32 * sizeof(double));
+   double * mat16 = malloc(32 * 32 * sizeof(double));
 
-   /* L is the reference matrix. We compute A = L*Lt to then perform
-    * cholesky factorization on A (and we should find L back)*/
 
-   double * matL = malloc(N * N * sizeof(double));
-   for (y=0; y<N; y++) {
+   /* compute mat32 = L*Lt */
+   for (y=0; y<32; y++) {
       for (x=0; x<=y; x++) {
-         matL[y*N+x] = 1.0 / ((double)(x+y)+5.0);
-      }
-   }
-
-   /* compute A = L*Lt */
-   for (y=0; y<N; y++) {
-      for (x=0; x<=y; x++) {
-         matA[y*N+x] = 0.0;
+         mat32[y*32+x] = 0.0;
          for (z=0; z<=min(x,y); z++) {
-            matA[y*N+x] += matL[y*N+z] * matL[x*N+z];
+            mat32[y*32+x] += L(z,y) * L(z,x);
          }
       }
    }
 
+   /* compute mat16 = L*Lt */
+   for (y=0; y<16; y++) {
+      for (x=0; x<=y; x++) {
+         mat16[y*16+x] = 0.0;
+         for (z=0; z<=min(x,y); z++) {
+            mat16[y*16+x] += L(z,y) * L(z,x);
+         }
+      }
+   }
+
+   double * kernelInput[] = {
+      mat32,
+      mat16,
+      mat32
+   };
+
    char * kernelFiles[] = {
+      "dpotrf_v1.cl",
       "dpotrf_v1.cl",
       "dpotrf_v2.cl"
    };
 
    size_t kernelGroupSize[][3] = {
       {32, 32, 1},
+      {16, 16, 1},
       {32, 16, 1}
+   };
+
+   size_t kernelGridSize[][3] = {
+      {32, 32, 1},
+      {16, 16, 1},
+      {32, 32, 1}
    };
 
    int nb_ker = sizeof(kernelFiles) / sizeof(char*);
@@ -103,13 +123,16 @@ int main() {
          int k;
          for (k=0; k<nb_ker; k++) {
 
-            int err = performCholesky(matA, matL, kernelFiles[k], (size_t*)&kernelGroupSize[k], devs[d], &errCount, &duration, &log);
+            int err = performCholesky(kernelInput[k], kernelFiles[k], (size_t*)&kernelGridSize[k], (size_t*)&kernelGroupSize[k], devs[d], &errCount, &duration, &log);
 
             if (err != CL_SUCCESS) {
-               printf("      - Error %d with kernel %s. Build log: %s\n", err, kernelFiles[k], log);
+               printf("      - Error %d with kernel %s: %s\n", err, kernelFiles[k], log);
             }
             else {
-               printf("      - kernel %s took %.f ms and %s (%d errors).\n", kernelFiles[k], duration/1000.0, (errCount == 0 ? "succeeded" : "failed"), errCount);
+               printf("      - kernel %s (grid %ldx%ldx%ld, group %ldx%ldx%ld) took %.f ms and %s (%d errors).\n", 
+                  kernelFiles[k], (long)kernelGridSize[k][0], (long)kernelGridSize[k][1], (long)kernelGridSize[k][2],
+                  (long)kernelGroupSize[k][0], (long)kernelGroupSize[k][1], (long)kernelGroupSize[k][2],
+                  duration/1000.0, (errCount == 0 ? "succeeded" : "failed"), errCount);
             }
          }
          printf("\n");
@@ -137,14 +160,16 @@ int main() {
    return 0;
 }
 
-int performCholesky(double * matA, double * matRef, char * kernelFile, size_t * kernelGroupSize, cl_device_id dev, int * errCount, cl_ulong * duration, char ** log) {
+int performCholesky(double * matA, char * kernelFile, size_t * kernelGridSize, size_t * kernelGroupSize, cl_device_id dev, int * errCount, cl_ulong * duration, char ** log) {
 
    cl_event ev_writeA, ev_ker, ev_readA;
    int x, y;
    cl_int err;
 
-   double * matB = malloc(N * N * sizeof(double));
-   memset(matB, 0, N * N * sizeof(double));
+   size_t size = kernelGridSize[0] * kernelGridSize[1] * sizeof(double);
+
+   double * matB = malloc(size);
+   memset(matB, 0, size);
 
    FILE * f = fopen(kernelFile, "r");
    if (f == NULL) return 1;
@@ -190,13 +215,13 @@ int performCholesky(double * matA, double * matRef, char * kernelFile, size_t * 
       return err;
    }
 
-   cl_mem bufA = clCreateBuffer(ctx, CL_MEM_READ_WRITE, N * N * sizeof(double), NULL, &err);
+   cl_mem bufA = clCreateBuffer(ctx, CL_MEM_READ_WRITE, size, NULL, &err);
    if (err != CL_SUCCESS) {
       *log = strdup("Unable to allocate buffer");
       return err;
    }
 
-   err = clEnqueueWriteBuffer(cq, bufA, 0, 0, N * N * sizeof(double), matA, 0, NULL, &ev_writeA);
+   err = clEnqueueWriteBuffer(cq, bufA, 0, 0, size, matA, 0, NULL, &ev_writeA);
    if (err != CL_SUCCESS) {
       *log = strdup("Unable to enqueue write buffer command");
       return err;
@@ -208,21 +233,37 @@ int performCholesky(double * matA, double * matRef, char * kernelFile, size_t * 
       return err;
    }
 
-   size_t globalDim[] = {N, N};
    cl_event deps[] = {ev_writeA};
-   err = clEnqueueNDRangeKernel(cq, ker, 2, NULL, globalDim, kernelGroupSize, 1, deps, &ev_ker);
+   err = clEnqueueNDRangeKernel(cq, ker, 2, NULL, kernelGridSize, kernelGroupSize, 1, deps, &ev_ker);
    if (err != CL_SUCCESS) {
       *log = strdup("Unable to enqueue kernel execution command");
       return err;
    }
 
-   err = clEnqueueReadBuffer(cq, bufA, 0, 0, N*N*sizeof(double), matB, 1, &ev_ker, &ev_readA);
+   err = clEnqueueReadBuffer(cq, bufA, 0, 0, size, matB, 1, &ev_ker, &ev_readA);
    if (err != CL_SUCCESS) {
       *log = strdup("Unable to enqueue read buffer command");
       return err;
    }
 
    clFinish(cq);
+
+   clGetEventInfo(ev_writeA, CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(cl_int), &err, NULL);
+   if (err != CL_SUCCESS) {
+      *log = strdup("Error with Write Buffer Command");
+      return err;
+   }
+   clGetEventInfo(ev_ker, CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(cl_int), &err, NULL);
+   if (err != CL_SUCCESS) {
+      *log = strdup("Error with ND Range Command");
+      return err;
+   }
+
+   clGetEventInfo(ev_readA, CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(cl_int), &err, NULL);
+   if (err != CL_SUCCESS) {
+      *log = strdup("Error with Read Buffer Command");
+      return err;
+   }
 
    cl_ulong start, end;
    err = clGetEventProfilingInfo(ev_ker, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
@@ -250,9 +291,9 @@ int performCholesky(double * matA, double * matRef, char * kernelFile, size_t * 
 
    // Check result
    *errCount = 0;
-   for (y=0; y<N; y++) {
+   for (y=0; y<kernelGridSize[1]; y++) {
       for (x=0; x<=y; x++) {
-         if (fabs(matB[y*N+x]-matRef[y*N+x]) > 10e-9) {
+         if (fabs(matB[y*kernelGridSize[0]+x]-L(x,y)) > 10e-9) {
             *errCount += 1;
          }
       }
