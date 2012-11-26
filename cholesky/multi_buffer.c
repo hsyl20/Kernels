@@ -4,14 +4,14 @@
 #include <string.h>
 #include <CL/cl.h>
 
-// Buffer size
-#define N 32
+// Buffer size (max 512 because of dtrsm_block, must be divisible by 16)
+#define N 64
 // Buffer count (whole matrix size = N*BCOUNT ^ 2)
-#define BCOUNT 4
+#define BCOUNT 5
 
 #define min(a,b) ( a < b ? a : b)
 
-int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, int * errCount, cl_ulong * duration, char ** log);
+int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, double epsilon, int * errCount, double * maxDiff, cl_ulong * duration, char ** log);
 
 #pragma weak clGetExtensionFunctionAddressForPlatform
 extern void * clGetExtensionFunctionAddressForPlatform(cl_platform_id, const char *);
@@ -26,13 +26,13 @@ extern void * clGetExtensionFunctionAddress(const char *);
 
 int main() {
 
-   int x, y, z, b, c;
+   int x, y, z, X, Y;
 
    double * mat[BCOUNT][BCOUNT];
 
-   for (b = 0; b<BCOUNT; b++) {
-      for (c = 0; c<BCOUNT; c++) {
-         mat[b][c] = malloc(N * N * sizeof(double));
+   for (Y = 0; Y<BCOUNT; Y++) {
+      for (X = 0; X<=Y; X++) {
+         mat[Y][X] = malloc(N * N * sizeof(double));
       }
    }
 
@@ -40,13 +40,13 @@ int main() {
    printf("Computing input matrix (size = %d x %d, %d x %d blocks)...\n", N*BCOUNT, N*BCOUNT, BCOUNT, BCOUNT);
    for (y=0; y<N*BCOUNT; y++) {
       for (x=0; x<=y; x++) {
-         int b = x/N;
-         int c = y/N;
+         int X = x/N;
+         int Y = y/N;
          int y2 = y % N;
          int x2 = x % N;
-         mat[b][c][y2*N+x2] = 0.0;
+         mat[Y][X][y2*N+x2] = 0.0;
          for (z=0; z <= min(x,y); z++) {
-            mat[b][c][y2*N+x2] += L(z,y) * L(z,x);
+            mat[Y][X][y2*N+x2] += L(z,y) * L(z,x);
          }
       }
    }
@@ -91,15 +91,21 @@ int main() {
          int errCount;
          cl_ulong duration;
          char * log;
+         double maxDiff;
+         double epsilon = 10e-8;
 
-         int err = performCholesky(mat, N, devs[d], &errCount, &duration, &log);
+         int err = performCholesky(mat, N, devs[d], epsilon, &errCount, &maxDiff, &duration, &log);
 
          if (err != CL_SUCCESS) {
             printf("      - Error %d: %s\n", err, log);
          }
          else {
-            printf("      - Execution time: %.f ms and %s (%d errors).\n", 
-               duration/1000.0, (errCount == 0 ? "succeeded" : "failed"), errCount);
+            printf("      - Execution time: %.f ms and %s",
+               duration/1000.0, (errCount == 0 ? "succeeded" : "failed"));
+            if (errCount > 0) {
+               printf(" (%d errors, max diff %e, epsilon %e).\n", errCount, maxDiff, epsilon);
+            }
+            else printf(" (epsilon %e)\n", epsilon);
          }
          printf("\n");
       }
@@ -166,18 +172,18 @@ cl_int loadKernel(char * kernelFile, char * kernelName, cl_context ctx, cl_devic
    return CL_SUCCESS;
 }
 
-int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, int * errCount, cl_ulong * duration, char ** log) {
+int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, double epsilon, int * errCount, double * maxDiff, cl_ulong * duration, char ** log) {
 
-   int x, y, b, c, d;
+   int x, y, X, Y;
    cl_int err;
 
    size_t size = n * n * sizeof(double);
 
    double * matR[BCOUNT][BCOUNT];
-   for (b=0; b<BCOUNT; b++) {
-      for(c=0; c<BCOUNT; c++) {
-         matR[b][c] = malloc(size);
-         memset(matR[b][c], 0, size);
+   for (Y=0; Y<BCOUNT; Y++) {
+      for(X=0; X<=Y; X++) {
+         matR[Y][X] = malloc(size);
+         memset(matR[Y][X], 0, size);
       }
    }
 
@@ -219,18 +225,18 @@ int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, 
    cl_mem buf[BCOUNT][BCOUNT];
    cl_event events[BCOUNT][BCOUNT];
 
-   for (b=0; b<BCOUNT; b++) {
-      for (c=0; c<BCOUNT; c++) {
+   for (Y=0; Y<BCOUNT; Y++) {
+      for (X=0; X<=Y; X++) {
 
 
-         buf[b][c] = clCreateBuffer(ctx, CL_MEM_READ_WRITE, size, NULL, &err);
+         buf[Y][X] = clCreateBuffer(ctx, CL_MEM_READ_WRITE, size, NULL, &err);
          if (err != CL_SUCCESS) {
             *log = strdup("Unable to allocate buffer");
             return err;
          }
 
 
-         err = clEnqueueWriteBuffer(cq, buf[b][c], 0, 0, size, mat[b][c], 0, NULL, &events[b][c]);
+         err = clEnqueueWriteBuffer(cq, buf[Y][X], 0, 0, size, mat[Y][X], 0, NULL, &events[Y][X]);
          if (err != CL_SUCCESS) {
             *log = strdup("Unable to enqueue write buffer command");
             return err;
@@ -245,15 +251,17 @@ int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, 
 
    cl_event ev;
 
-   for (b=0; b<BCOUNT; b++) {
+   int step;
+
+   for (step=0; step<BCOUNT; step++) {
 
       /******************** Diagonal block ***********************/
 
-      err = clSetKernelArg(dpotrf, 0, sizeof(cl_mem), &buf[b][b]);
+      err = clSetKernelArg(dpotrf, 0, sizeof(cl_mem), &buf[step][step]);
       err |= clSetKernelArg(dpotrf, 1, sizeof(cl_ulong), &n);
-      err |= clSetKernelArg(dtrsm, 0, sizeof(cl_mem), &buf[b][b]);
+      err |= clSetKernelArg(dtrsm, 0, sizeof(cl_mem), &buf[step][step]);
       err |= clSetKernelArg(dtrsm, 1, sizeof(cl_ulong), &n);
-      err |= clSetKernelArg(dgemm, 0, sizeof(cl_mem), &buf[b][b]);
+      err |= clSetKernelArg(dgemm, 0, sizeof(cl_mem), &buf[step][step]);
       err |= clSetKernelArg(dgemm, 1, sizeof(cl_ulong), &n);
       if (err != CL_SUCCESS) {
          *log = strdup("Unable to set kernel parameter");
@@ -274,13 +282,13 @@ int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, 
          size_t dpotrf_global[] = {16,16,1};
          size_t dpotrf_local[] = {16,16,1};
 
-         err = clEnqueueNDRangeKernel(cq, dpotrf, 2, NULL, dpotrf_global, dpotrf_local, 1, &events[b][b], &ev);
+         err = clEnqueueNDRangeKernel(cq, dpotrf, 2, NULL, dpotrf_global, dpotrf_local, 1, &events[step][step], &ev);
          if (err != CL_SUCCESS) {
             *log = strdup("Unable to enqueue kernel execution command");
             return err;
          }
-         clReleaseEvent(events[b][b]);
-         events[b][b] = ev;
+         clReleaseEvent(events[step][step]);
+         events[step][step] = ev;
 
          size_t r = n - (i+1)*16;
 
@@ -288,35 +296,36 @@ int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, 
 
             size_t dtrsm_global[] = {16,r,1};
             size_t dtrsm_local[] = {16,16,1};
-            err = clEnqueueNDRangeKernel(cq, dtrsm, 2, NULL, dtrsm_global, dtrsm_local, 1, &events[b][b], &ev);
+            err = clEnqueueNDRangeKernel(cq, dtrsm, 2, NULL, dtrsm_global, dtrsm_local, 1, &events[step][step], &ev);
             if (err != CL_SUCCESS) {
                *log = strdup("Unable to enqueue kernel execution command");
                return err;
             }
-            clReleaseEvent(events[b][b]);
-            events[b][b] = ev;
+            clReleaseEvent(events[step][step]);
+            events[step][step] = ev;
 
             size_t dgemm_global[] = {r, r,1};
             size_t dgemm_local[] = {16,16,1};
-            err = clEnqueueNDRangeKernel(cq, dgemm, 2, NULL, dgemm_global, dgemm_local, 1, &events[b][b], &ev);
+            err = clEnqueueNDRangeKernel(cq, dgemm, 2, NULL, dgemm_global, dgemm_local, 1, &events[step][step], &ev);
             if (err != CL_SUCCESS) {
                *log = strdup("Unable to enqueue kernel execution command");
                return err;
             }
-            clReleaseEvent(events[b][b]);
-            events[b][b] = ev;
+            clReleaseEvent(events[step][step]);
+            events[step][step] = ev;
          }
       }
 
       /*********** SUB-DIAGONAL BLOCKS *******************/
-      err = clSetKernelArg(dtrsm_block, 0, sizeof(cl_mem), &buf[b][b]);
+      err = clSetKernelArg(dtrsm_block, 0, sizeof(cl_mem), &buf[step][step]);
       if (err != CL_SUCCESS) {
          *log = strdup("Unable to set kernel parameter");
          return err;
       }
 
-      for (c=b+1; c<BCOUNT; c++) {
-         err = clSetKernelArg(dtrsm_block, 1, sizeof(cl_mem), &buf[b][c]);
+      X = step;
+      for (Y=step+1; Y<BCOUNT; Y++) {
+         err = clSetKernelArg(dtrsm_block, 1, sizeof(cl_mem), &buf[Y][X]);
          if (err != CL_SUCCESS) {
             *log = strdup("Unable to set kernel parameter");
             return err;
@@ -325,23 +334,23 @@ int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, 
          size_t dtrsm_block_global[] = {N,N,1};
          size_t dtrsm_block_local[] = {N,1,1};
 
-         cl_event deps[] = {events[b][b], events[b][c]};
+         cl_event deps[] = {events[step][step], events[Y][X]};
          err = clEnqueueNDRangeKernel(cq, dtrsm_block, 2, NULL, dtrsm_block_global, dtrsm_block_local, 2, deps, &ev);
          if (err != CL_SUCCESS) {
             *log = strdup("Unable to enqueue kernel execution command");
             return err;
          }
-         clReleaseEvent(events[b][c]);
-         events[b][c] = ev;
+         clReleaseEvent(events[Y][X]);
+         events[Y][X] = ev;
       }
 
 
       /*********** OTHER BLOCKS *******************/
-      for (c=b+1; c<BCOUNT; c++) {
-         for (d=b+1; d<=c; d++) {
-            err = clSetKernelArg(dgemm_block, 0, sizeof(cl_mem), &buf[b][c]);
-            err |= clSetKernelArg(dgemm_block, 1, sizeof(cl_mem), &buf[b][d]);
-            err |= clSetKernelArg(dgemm_block, 2, sizeof(cl_mem), &buf[d][c]);
+      for (Y=step+1; Y<BCOUNT; Y++) {
+         for (X=step+1; X<=Y; X++) {
+            err = clSetKernelArg(dgemm_block, 0, sizeof(cl_mem), &buf[Y][step]);
+            err |= clSetKernelArg(dgemm_block, 1, sizeof(cl_mem), &buf[X][step]);
+            err |= clSetKernelArg(dgemm_block, 2, sizeof(cl_mem), &buf[Y][X]);
             if (err != CL_SUCCESS) {
                *log = strdup("Unable to set kernel parameter");
                return err;
@@ -350,14 +359,14 @@ int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, 
             size_t dgemm_block_global[] = {N,N,1};
             size_t dgemm_block_local[] = {16,16,1};
 
-            cl_event deps[] = {events[c][c], events[b][d], events[c][d]};
+            cl_event deps[] = {events[Y][step], events[X][step], events[Y][X]};
             err = clEnqueueNDRangeKernel(cq, dgemm_block, 2, NULL, dgemm_block_global, dgemm_block_local, 3, deps, &ev);
             if (err != CL_SUCCESS) {
                *log = strdup("Unable to enqueue kernel execution command");
                return err;
             }
-            clReleaseEvent(events[c][d]);
-            events[c][d] = ev;
+            clReleaseEvent(events[Y][X]);
+            events[Y][X] = ev;
          }
       }
 
@@ -368,16 +377,16 @@ int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, 
    clock_gettime(CLOCK_MONOTONIC, &end);
 
 
-   for (b=0; b<BCOUNT; b++) {
-      for (c=0; c<BCOUNT; c++) {
+   for (Y=0; Y<BCOUNT; Y++) {
+      for (X=0; X<=Y; X++) {
 
-         err = clEnqueueReadBuffer(cq, buf[b][c], 0, 0, size, matR[b][c], 1, &events[b][c], &ev);
+         err = clEnqueueReadBuffer(cq, buf[Y][X], 0, 0, size, matR[Y][X], 1, &events[Y][X], &ev);
          if (err != CL_SUCCESS) {
             *log = strdup("Unable to enqueue read buffer command");
             return err;
          }
-         clReleaseEvent(events[b][c]);
-         events[b][c] = ev;
+         clReleaseEvent(events[Y][X]);
+         events[Y][X] = ev;
       }
    }
 
@@ -385,10 +394,10 @@ int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, 
 
    *duration = end.tv_nsec - start.tv_nsec + (end.tv_sec-start.tv_sec) * 10e9;
 
-   for (b=0; b<BCOUNT; b++) {
-      for (c=0; c<BCOUNT; c++) {
-         clReleaseMemObject(buf[b][c]);
-         clReleaseEvent(events[b][c]);
+   for (Y=0; Y<BCOUNT; Y++) {
+      for (X=0; X<=Y; X++) {
+         clReleaseMemObject(buf[Y][X]);
+         clReleaseEvent(events[Y][X]);
       }
    }
    clReleaseKernel(dpotrf);
@@ -402,7 +411,7 @@ int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, 
 
 /*   for (y=0; y<n*BCOUNT; y++) {
       for (x=0; x<=y; x++) {
-         printf("%.2f ", L(x,y));
+         printf("%.3f ", L(x,y));
       }
       printf("\n");
    }
@@ -410,25 +419,29 @@ int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, 
 
    for (y=0; y<n*BCOUNT; y++) {
       for (x=0; x<=y; x++) {
-         int b = x/N;
-         int c = y/N;
+         X = x/N;
+         Y = y/N;
          int y2 = y % N;
          int x2 = x % N;
-         printf("%.2f ", matR[b][c][y2*n+x2]);
+         printf("%.3f ", matR[Y][X][y2*n+x2]);
       }
       printf("\n");
    }*/
 
    // Check result
    *errCount = 0;
+   *maxDiff = 0.0;
+
    for (y=0; y<n*BCOUNT; y++) {
       for (x=0; x<=y; x++) {
-         int b = x/N;
-         int c = y/N;
+         X = x/N;
+         Y = y/N;
          int y2 = y % N;
          int x2 = x % N;
-         if (fabs(matR[b][c][y2*n+x2]-L(x,y)) > 10e-9) {
+         double diff = fabs(matR[Y][X][y2*n+x2]-L(x,y));
+         if (diff > epsilon) {
             *errCount += 1;
+            if (diff > *maxDiff) *maxDiff = diff;
          }
       }
    }

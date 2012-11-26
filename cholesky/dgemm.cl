@@ -41,14 +41,14 @@ __kernel void dgemm(__global double * m, unsigned long n, unsigned long step) {
    if (gx <= gy) {
       double my[8];
       #define red(u) a[u+y*16] * b[u+x*16]
-/*      my[0] = red(0) + red(8);
+      my[0] = red(0) + red(8);
       my[1] = red(1) + red(9);
       my[2] = red(2) + red(10);
       my[3] = red(3) + red(11);
       my[4] = red(4) + red(12);
       my[5] = red(5) + red(13);
       my[6] = red(6) + red(14);
-      my[7] = red(6) + red(15);
+      my[7] = red(7) + red(15);
 
       my[0] += my[4];
       my[1] += my[5];
@@ -58,12 +58,12 @@ __kernel void dgemm(__global double * m, unsigned long n, unsigned long step) {
       my[0] += my[2];
       my[1] += my[3];
 
-      my[0] += my[1];*/
+      my[0] += my[1];
 
-      my[0] = 0.0;
+/*      my[0] = 0.0;
       for (int i=0; i<16; i++) {
          my[0] += a[i+y*16] * b[i+x*16];
-      }
+      }*/
 
       m[curr_off] = curr[off] - my[0]; 
    }

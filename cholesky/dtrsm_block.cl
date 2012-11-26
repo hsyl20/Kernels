@@ -24,17 +24,21 @@ __kernel void dtrsm_block(__global double * diagBlock, __global double * currBlo
 
    curr[X] = currBlock[X + Y*w];
 
+   double my = 0.0;
+
    for (int i=0; i<w; i++) {
 
       if (X >= i) diag[X] = diagBlock[i + X*w];
    
       barrier(CLK_LOCAL_MEM_FENCE);
 
-      if (X == i) curr[i] /= diag[i];
+      if (X == i) {
+         curr[i] = (curr[i] - my) / diag[i];
+      }
 
       barrier(CLK_LOCAL_MEM_FENCE);
 
-      if (X > i) curr[X] -= curr[i] * diag[X];
+      if (X > i) my += curr[i] * diag[X];
 
       barrier(CLK_LOCAL_MEM_FENCE);
    }
