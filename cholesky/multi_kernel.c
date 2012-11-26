@@ -271,6 +271,10 @@ int performCholesky(double * matN, cl_ulong n, cl_device_id dev, int * errCount,
       }
    }
 
+   clFinish(cq);
+
+   clock_gettime(CLOCK_MONOTONIC, &end);
+
    err = clEnqueueReadBuffer(cq, bufA, 0, 0, size, matB, 1, &dep, &ev_readA);
    if (err != CL_SUCCESS) {
       *log = strdup("Unable to enqueue read buffer command");
@@ -278,6 +282,7 @@ int performCholesky(double * matN, cl_ulong n, cl_device_id dev, int * errCount,
    }
 
    clFinish(cq);
+
 
    clGetEventInfo(ev_writeA, CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(cl_int), &err, NULL);
    if (err != CL_SUCCESS) {
@@ -290,8 +295,6 @@ int performCholesky(double * matN, cl_ulong n, cl_device_id dev, int * errCount,
       *log = strdup("Error with Read Buffer Command");
       return err;
    }
-
-   clock_gettime(CLOCK_MONOTONIC, &end);
 
    *duration = end.tv_nsec - start.tv_nsec + (end.tv_sec-start.tv_sec) * 10e9;
 
