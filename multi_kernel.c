@@ -6,7 +6,7 @@
 
 #define min(a,b) ( a < b ? a : b)
 
-int performCholesky(double * matN, cl_long n, cl_device_id dev, int * errCount, cl_ulong * duration, char ** log);
+int performCholesky(double * matN, cl_ulong n, cl_device_id dev, int * errCount, cl_ulong * duration, char ** log);
 
 #pragma weak clGetExtensionFunctionAddressForPlatform
 extern void * clGetExtensionFunctionAddressForPlatform(cl_platform_id, const char *);
@@ -17,8 +17,8 @@ extern void * clGetExtensionFunctionAddress(const char *);
 /* L is the reference matrix. We compute A = L*Lt to then perform
  * cholesky factorization on A (and we should find L back)*/
 
-#define L(x,y) (1.0 / ((double)(x+y)+5.0))
-#define N 1024
+#define L(x,y) (100.0 / ((double)(x+y)+100.0))
+#define N 32
 
 int main() {
 
@@ -28,10 +28,11 @@ int main() {
 
 
    /* compute matN = L*Lt */
+   printf("Computing input matrix...\n");
    for (y=0; y<N; y++) {
       for (x=0; x<=y; x++) {
          matN[y*N+x] = 0.0;
-         for (z=0; z<=min(x,y); z++) {
+         for (z=0; z <= min(x,y); z++) {
             matN[y*N+x] += L(z,y) * L(z,x);
          }
       }
@@ -152,7 +153,7 @@ cl_int loadKernel(char * kernelFile, char * kernelName, cl_context ctx, cl_devic
    return CL_SUCCESS;
 }
 
-int performCholesky(double * matN, cl_long n, cl_device_id dev, int * errCount, cl_ulong * duration, char ** log) {
+int performCholesky(double * matN, cl_ulong n, cl_device_id dev, int * errCount, cl_ulong * duration, char ** log) {
 
    cl_event ev_writeA, ev_readA;
    int x, y;
@@ -203,17 +204,18 @@ int performCholesky(double * matN, cl_long n, cl_device_id dev, int * errCount, 
    }
 
    err = clSetKernelArg(dpotrf, 0, sizeof(bufA), &bufA);
-   err |= clSetKernelArg(dpotrf, 1, sizeof(cl_long), &n);
+   err |= clSetKernelArg(dpotrf, 1, sizeof(cl_ulong), &n);
    err |= clSetKernelArg(dtrsm, 0, sizeof(bufA), &bufA);
-   err |= clSetKernelArg(dtrsm, 1, sizeof(cl_long), &n);
+   err |= clSetKernelArg(dtrsm, 1, sizeof(cl_ulong), &n);
    err |= clSetKernelArg(dgemm, 0, sizeof(bufA), &bufA);
-   err |= clSetKernelArg(dgemm, 1, sizeof(cl_long), &n);
+   err |= clSetKernelArg(dgemm, 1, sizeof(cl_ulong), &n);
    if (err != CL_SUCCESS) {
       *log = strdup("Unable to set kernel parameter");
       return err;
    }
 
    cl_event dep = ev_writeA;
+   clRetainEvent(ev_writeA);
    clFinish(cq);
 
    struct timespec start, end;
@@ -222,7 +224,9 @@ int performCholesky(double * matN, cl_long n, cl_device_id dev, int * errCount, 
    cl_long i;
    for (i=0; i<n/16; i++) {
 
-      err |= clSetKernelArg(dpotrf, 2, sizeof(cl_ulong), &i);
+      cl_event ev;
+
+      err = clSetKernelArg(dpotrf, 2, sizeof(cl_ulong), &i);
       err |= clSetKernelArg(dgemm, 2, sizeof(cl_ulong), &i);
       err |= clSetKernelArg(dtrsm, 2, sizeof(cl_ulong), &i);
       if (err != CL_SUCCESS) {
@@ -232,26 +236,38 @@ int performCholesky(double * matN, cl_long n, cl_device_id dev, int * errCount, 
 
       size_t dpotrf_global[] = {16,16,1};
       size_t dpotrf_local[] = {16,16,1};
-      err = clEnqueueNDRangeKernel(cq, dpotrf, 2, NULL, dpotrf_global, dpotrf_local, 1, &dep, &dep);
+
+      err = clEnqueueNDRangeKernel(cq, dpotrf, 2, NULL, dpotrf_global, dpotrf_local, 1, &dep, &ev);
       if (err != CL_SUCCESS) {
          *log = strdup("Unable to enqueue kernel execution command");
          return err;
       }
+      clReleaseEvent(dep);
+      dep = ev;
 
-      size_t dtrsm_global[] = {16, n - i*16,1};
-      size_t dtrsm_local[] = {16,16,1};
-      err = clEnqueueNDRangeKernel(cq, dtrsm, 2, NULL, dtrsm_global, dtrsm_local, 1, &dep, &dep);
-      if (err != CL_SUCCESS) {
-         *log = strdup("Unable to enqueue kernel execution command");
-         return err;
-      }
+      size_t r = n - (i+1)*16;
 
-      size_t dgemm_global[] = {n - i*16, n - i*16,1};
-      size_t dgemm_local[] = {16,16,1};
-      err = clEnqueueNDRangeKernel(cq, dgemm, 2, NULL, dgemm_global, dgemm_local, 1, &dep, &dep);
-      if (err != CL_SUCCESS) {
-         *log = strdup("Unable to enqueue kernel execution command");
-         return err;
+      if (r > 0) {
+
+         size_t dtrsm_global[] = {16,r,1};
+         size_t dtrsm_local[] = {16,16,1};
+         err = clEnqueueNDRangeKernel(cq, dtrsm, 2, NULL, dtrsm_global, dtrsm_local, 1, &dep, &ev);
+         if (err != CL_SUCCESS) {
+            *log = strdup("Unable to enqueue kernel execution command");
+            return err;
+         }
+         clReleaseEvent(dep);
+         dep = ev;
+
+         size_t dgemm_global[] = {r, r,1};
+         size_t dgemm_local[] = {16,16,1};
+         err = clEnqueueNDRangeKernel(cq, dgemm, 2, NULL, dgemm_global, dgemm_local, 1, &dep, &ev);
+         if (err != CL_SUCCESS) {
+            *log = strdup("Unable to enqueue kernel execution command");
+            return err;
+         }
+         clReleaseEvent(dep);
+         dep = ev;
       }
    }
 
@@ -287,6 +303,22 @@ int performCholesky(double * matN, cl_long n, cl_device_id dev, int * errCount, 
    clReleaseKernel(dgemm);
    clReleaseCommandQueue(cq);
    clReleaseContext(ctx);
+
+
+/*   for (y=0; y<n; y++) {
+      for (x=0; x<=y; x++) {
+         printf("%.2f ", L(x,y));
+      }
+      printf("\n");
+   }
+   printf("\n");
+
+   for (y=0; y<n; y++) {
+      for (x=0; x<=y; x++) {
+         printf("%.2f ", matB[y*n+x]);
+      }
+      printf("\n");
+   }*/
 
    // Check result
    *errCount = 0;

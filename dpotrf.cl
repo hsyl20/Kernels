@@ -13,7 +13,7 @@
  *  - step : iteration (in block of 16 columns)
  * 
  */
-__kernel void dpotrf(__global double * m, long n, long step) {
+__kernel void dpotrf(__global double * m, unsigned long n, unsigned long step) {
    
    __local double s[16*16];
    
@@ -21,7 +21,7 @@ __kernel void dpotrf(__global double * m, long n, long step) {
    int y = get_local_id(1);
 
    int off = y*16+x;                // local offset
-   int diag_off = step*16*(n+1);       // global diagonal block offset
+   int diag_off = step*16*(n+1) + y*n + x;       // global diagonal block offset
 
    // Load diagonal block
    __local double diag[16*16];
