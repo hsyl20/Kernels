@@ -18,7 +18,7 @@ extern void * clGetExtensionFunctionAddress(const char *);
  * cholesky factorization on A (and we should find L back)*/
 
 #define L(x,y) (100.0 / ((double)(x+y)+100.0))
-#define N 32
+#define N 512
 
 int main() {
 
@@ -28,7 +28,7 @@ int main() {
 
 
    /* compute matN = L*Lt */
-   printf("Computing input matrix...\n");
+   printf("Computing input matrix (size = %d)...\n", N);
    for (y=0; y<N; y++) {
       for (x=0; x<=y; x++) {
          matN[y*N+x] = 0.0;
