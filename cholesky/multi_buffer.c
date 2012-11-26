@@ -8,10 +8,12 @@
 #define N 64
 // Buffer count (whole matrix size = N*BCOUNT ^ 2)
 #define BCOUNT 5
+double epsilon = 10e-8;
 
 #define min(a,b) ( a < b ? a : b)
 
-int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, double epsilon, int * errCount, double * maxDiff, cl_ulong * duration, char ** log);
+int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_int nb_dev, cl_device_id * devs, double epsilon, int * errCount, double * maxDiff, cl_ulong * duration, char ** log);
+void benchDev(double * mat[BCOUNT][BCOUNT], cl_int nb_dev, cl_device_id * devs);
 
 #pragma weak clGetExtensionFunctionAddressForPlatform
 extern void * clGetExtensionFunctionAddressForPlatform(cl_platform_id, const char *);
@@ -81,38 +83,13 @@ int main() {
 
       cl_uint d;
       for (d=0; d<nb_devs; d++) {
-         size_t dev_name_size;
-         clGetDeviceInfo(devs[d], CL_DEVICE_NAME, 0, NULL, &dev_name_size);
-         char dev_name[dev_name_size];
-         clGetDeviceInfo(devs[d], CL_DEVICE_NAME, dev_name_size, dev_name, NULL);
-
-         printf("  - Benchmarking device %s:\n", dev_name);
-
-         int errCount;
-         cl_ulong duration;
-         char * log;
-         double maxDiff;
-         double epsilon = 10e-8;
-
-         int err = performCholesky(mat, N, devs[d], epsilon, &errCount, &maxDiff, &duration, &log);
-
-         if (err != CL_SUCCESS) {
-            printf("      - Error %d: %s\n", err, log);
-         }
-         else {
-            printf("      - Execution time: %.f ms and %s",
-               duration/1000.0, (errCount == 0 ? "succeeded" : "failed"));
-            if (errCount > 0) {
-               printf(" (%d errors, max diff %e, epsilon %e).\n", errCount, maxDiff, epsilon);
-            }
-            else printf(" (epsilon %e)\n", epsilon);
-         }
-         printf("\n");
+         benchDev(mat, 1, &devs[d]);
       }
 
-      
       if (strstr(plat_name, "SOCL") != NULL) {
-         
+
+         benchDev(mat, nb_devs, devs);
+
          void (*clShutdown)(void) = (clGetExtensionFunctionAddressForPlatform != NULL ?
                                      clGetExtensionFunctionAddressForPlatform(platfs[p], "clShutdown") :
                                     (clGetExtensionFunctionAddress != NULL ?
@@ -132,7 +109,43 @@ int main() {
    return 0;
 }
 
-cl_int loadKernel(char * kernelFile, char * kernelName, cl_context ctx, cl_device_id dev, char **log, cl_kernel * kernel) {
+void benchDev(double * mat[BCOUNT][BCOUNT], cl_int nb_dev, cl_device_id * devs) {
+
+   if (nb_dev == 1) {
+      cl_device_id dev = devs[0];
+      size_t dev_name_size;
+      clGetDeviceInfo(dev, CL_DEVICE_NAME, 0, NULL, &dev_name_size);
+      char dev_name[dev_name_size];
+      clGetDeviceInfo(dev, CL_DEVICE_NAME, dev_name_size, dev_name, NULL);
+
+      printf("  - Benchmarking device %s:\n", dev_name);
+   }
+   else {
+      printf("  - Benchmarking SOCL scheduler\n");
+   }
+
+   int errCount;
+   cl_ulong duration;
+   char * log;
+   double maxDiff;
+
+   int err = performCholesky(mat, N, nb_dev, devs, epsilon, &errCount, &maxDiff, &duration, &log);
+
+   if (err != CL_SUCCESS) {
+      printf("      - Error %d: %s\n", err, log);
+   }
+   else {
+      printf("      - Execution time: %.f ms and %s",
+            duration/1000.0, (errCount == 0 ? "succeeded" : "failed"));
+      if (errCount > 0) {
+         printf(" (%d errors, max diff %e, epsilon %e).\n", errCount, maxDiff, epsilon);
+      }
+      else printf(" (epsilon %e)\n", epsilon);
+   }
+   printf("\n");
+}
+
+cl_int loadKernel(char * kernelFile, char * kernelName, cl_context ctx, cl_int nb_dev, cl_device_id * devs, char **log, cl_kernel * kernel) {
    cl_int err;
 
    FILE * f = fopen(kernelFile, "r");
@@ -148,14 +161,20 @@ cl_int loadKernel(char * kernelFile, char * kernelName, cl_context ctx, cl_devic
    fclose(f);
 
    cl_program prg = clCreateProgramWithSource(ctx, 1, (const char**)&source, NULL, NULL);
-   err = clBuildProgram(prg, 1, &dev, NULL, NULL, NULL);
 
-   if (err != CL_SUCCESS) {
-      size_t log_size;
-      clGetProgramBuildInfo(prg, dev, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
-      *log = malloc(log_size);
-      clGetProgramBuildInfo(prg, dev, CL_PROGRAM_BUILD_LOG, log_size, *log, NULL);
-      return err;
+   int d;
+   for (d = 0; d<nb_dev; d++) {
+      cl_device_id dev = devs[d];
+
+      err = clBuildProgram(prg, 1, &dev, NULL, NULL, NULL);
+
+      if (err != CL_SUCCESS) {
+         size_t log_size;
+         clGetProgramBuildInfo(prg, dev, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+         *log = malloc(log_size);
+         clGetProgramBuildInfo(prg, dev, CL_PROGRAM_BUILD_LOG, log_size, *log, NULL);
+         return err;
+      }
    }
 
    
@@ -172,7 +191,7 @@ cl_int loadKernel(char * kernelFile, char * kernelName, cl_context ctx, cl_devic
    return CL_SUCCESS;
 }
 
-int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, double epsilon, int * errCount, double * maxDiff, cl_ulong * duration, char ** log) {
+int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_int nb_dev, cl_device_id * devs, double epsilon, int * errCount, double * maxDiff, cl_ulong * duration, char ** log) {
 
    int x, y, X, Y;
    cl_int err;
@@ -187,38 +206,43 @@ int performCholesky(double * mat[BCOUNT][BCOUNT], cl_ulong n, cl_device_id dev, 
       }
    }
 
-
-   cl_context ctx = clCreateContext(NULL, 1, &dev, NULL, NULL, &err);
+   cl_context ctx = clCreateContext(NULL, nb_dev, devs, NULL, NULL, &err);
    if (err != CL_SUCCESS) {
       *log = strdup("Unable to create context");
       return err;
    }
 
-   cl_command_queue cq = clCreateCommandQueue(ctx, dev, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, &err);
+   cl_device_id dev;
+
+   // Compile for every device
+   cl_kernel dpotrf, dtrsm, dgemm, dtrsm_block, dgemm_block;
+   err = loadKernel("dpotrf.cl", "dpotrf", ctx, nb_dev, devs, log, &dpotrf);
    if (err != CL_SUCCESS) {
-      *log = strdup("Unable to create command queue");
+      return err;
+   }
+   err = loadKernel("dtrsm.cl", "dtrsm", ctx, nb_dev, devs, log, &dtrsm);
+   if (err != CL_SUCCESS) {
+      return err;
+   }
+   err = loadKernel("dgemm.cl", "dgemm", ctx, nb_dev, devs, log, &dgemm);
+   if (err != CL_SUCCESS) {
+      return err;
+   }
+   err = loadKernel("dgemm_block.cl", "dgemm_block", ctx, nb_dev, devs, log, &dgemm_block);
+   if (err != CL_SUCCESS) {
+      return err;
+   }
+   err = loadKernel("dtrsm_block.cl", "dtrsm_block", ctx, nb_dev, devs, log, &dtrsm_block);
+   if (err != CL_SUCCESS) {
       return err;
    }
 
-   cl_kernel dpotrf, dtrsm, dgemm, dtrsm_block, dgemm_block;
-   err = loadKernel("dpotrf.cl", "dpotrf", ctx, dev, log, &dpotrf);
+   // If more than one device, we are using SOCL to perform scheduling (=> dev = NULL)
+   dev = (nb_dev == 1 ? devs[0] : NULL);
+
+   cl_command_queue cq = clCreateCommandQueue(ctx, dev, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, &err);
    if (err != CL_SUCCESS) {
-      return err;
-   }
-   err = loadKernel("dtrsm.cl", "dtrsm", ctx, dev, log, &dtrsm);
-   if (err != CL_SUCCESS) {
-      return err;
-   }
-   err = loadKernel("dgemm.cl", "dgemm", ctx, dev, log, &dgemm);
-   if (err != CL_SUCCESS) {
-      return err;
-   }
-   err = loadKernel("dgemm_block.cl", "dgemm_block", ctx, dev, log, &dgemm_block);
-   if (err != CL_SUCCESS) {
-      return err;
-   }
-   err = loadKernel("dtrsm_block.cl", "dtrsm_block", ctx, dev, log, &dtrsm_block);
-   if (err != CL_SUCCESS) {
+      *log = strdup("Unable to create command queue");
       return err;
    }
 
